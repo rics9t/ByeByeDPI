@@ -100,6 +100,10 @@ class ByeDpiVpnService : VpnService() {
         Log.d(TAG, "DNS: ${configuration.dns}")
         val builder = Builder()
         builder.setSession("ByeDPI")
+
+        // FIX 1: Make the TUN fd blocking so read loop doesn't spin on EAGAIN at 100% CPU
+        builder.setBlocking(true)
+
         builder.setConfigureIntent(
             PendingIntent.getActivity(
                 this,
@@ -112,7 +116,7 @@ class ByeDpiVpnService : VpnService() {
         builder.addAddress("10.10.10.10", 32)
             .addRoute("0.0.0.0", 0)
 
-        // BIND ZEROTIER ADDRESSES: Allows Android kernel to own and ping your ZeroTier IPs
+        // Bind assigned ZeroTier addresses to TUN
         val ztPrefs = getSharedPreferences("zerotier_prefs", Context.MODE_PRIVATE)
         val ztAssigned = ztPrefs.getStringSet("assigned_ips", emptySet()) ?: emptySet()
         for (item in ztAssigned) {
@@ -122,7 +126,7 @@ class ByeDpiVpnService : VpnService() {
                 val prefix = parts[1].toIntOrNull() ?: 24
                 try {
                     builder.addAddress(ip, prefix)
-                    Log.i(TAG, "Bound ZeroTier IP to VPN: $ip/$prefix")
+                    Log.i(TAG, "Bound ZeroTier IP to TUN: $ip/$prefix")
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not add ZeroTier IP $item", e)
                 }

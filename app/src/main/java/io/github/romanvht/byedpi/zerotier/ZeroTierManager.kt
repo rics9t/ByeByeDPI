@@ -1,13 +1,21 @@
 package io.github.romanvht.byedpi.zerotier
 
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import com.google.gson.Gson
 import com.zerotier.sdk.*
+import io.github.romanvht.byedpi.data.Mode
+import io.github.romanvht.byedpi.data.RESTART_ACTION
+import io.github.romanvht.byedpi.receiver.ServiceActionReceiver
 import java.io.File
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.nio.ByteBuffer
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.thread
 
 class ZeroTierManager(private val context: Context) {
@@ -19,6 +27,45 @@ class ZeroTierManager(private val context: Context) {
     private var socket: DatagramSocket? = null
     private val prefs = context.getSharedPreferences("zerotier_prefs", Context.MODE_PRIVATE)
     private val gson = Gson()
+
+    // FIX 2: Fast, thread-safe in-memory cache for packet routing without per-packet JNI calls
+    data class ZtRoute(val nwid: Long, val net: Int, val mask: Int)
+    private class NetInfo(val mac: Long, val ips: List<Int>, val routes: List<ZtRoute>)
+
+    private val nets = ConcurrentHashMap<Long, NetInfo>()
+    @Volatile
+    private var routeCache: List<ZtRoute> = emptyList()
+
+    fun findRouteForIp(ip: Int): ZtRoute? =
+        routeCache.firstOrNull { (ip and it.mask) == it.net }
+
+    fun getMac(nwid: Long): Long? = nets[nwid]?.mac
+
+    fun getAssignedIpInts(nwid: Long): List<Int> = nets[nwid]?.ips ?: emptyList()
+
+    private fun v4(addr: InetAddress?): Int? =
+        (addr as? Inet4Address)?.address?.let { ByteBuffer.wrap(it).int }
+
+    private fun updateCache(nwid: Long, op: VirtualNetworkConfigOperation, cfg: VirtualNetworkConfig) {
+        if (op == VirtualNetworkConfigOperation.VIRTUAL_NETWORK_CONFIG_OPERATION_DOWN ||
+            op == VirtualNetworkConfigOperation.VIRTUAL_NETWORK_CONFIG_OPERATION_DESTROY
+        ) {
+            nets.remove(nwid)
+        } else {
+            val routes = cfg.routes?.mapNotNull { r ->
+                val t = r.target ?: return@mapNotNull null
+                val ip = v4(t.address) ?: return@mapNotNull null // Safely skips IPv6 routes
+                val p = t.port
+                if (p !in 1..32) return@mapNotNull null
+                val mask = if (p == 32) -1 else (-1 shl (32 - p))
+                ZtRoute(nwid, ip and mask, mask)
+            } ?: emptyList()
+
+            val ips = cfg.assignedAddresses?.mapNotNull { v4(it.address) } ?: emptyList()
+            nets[nwid] = NetInfo(cfg.mac, ips, routes)
+        }
+        routeCache = nets.values.flatMap { it.routes }
+    }
 
     var savedNetworks: Set<String>
         get() = prefs.getStringSet("saved_networks", emptySet()) ?: emptySet()
@@ -126,47 +173,6 @@ class ZeroTierManager(private val context: Context) {
         }
     }
 
-    data class ZtRoute(val nwid: Long, val targetIp: Int, val prefix: Int)
-
-    fun findRouteForIp(ip: Int): ZtRoute? {
-        for (cfg in getConfigs()) {
-            for (route in cfg.routes) {
-                if (route.target != null) {
-                    val addr = route.target.address ?: continue
-                    val targetIpInt = ipStringToInt(addr.hostAddress)
-                    val prefix = route.target.port
-                    if (isInSubnet(ip, targetIpInt, prefix)) {
-                        return ZtRoute(cfg.nwid, targetIpInt, prefix)
-                    }
-                }
-            }
-        }
-        return null
-    }
-
-    fun getAssignedIpInts(nwid: Long): List<Int> {
-        val cfg = getConfigs().firstOrNull { it.nwid == nwid } ?: return emptyList()
-        return cfg.assignedAddresses.mapNotNull {
-            val addr = it.address ?: return@mapNotNull null
-            ipStringToInt(addr.hostAddress)
-        }
-    }
-
-    private fun isInSubnet(ip: Int, net: Int, prefix: Int): Boolean {
-        if (prefix <= 0) return false
-        val mask = -1 shl (32 - prefix)
-        return (ip and mask) == (net and mask)
-    }
-
-    private fun ipStringToInt(ipStr: String): Int {
-        val parts = ipStr.split(".")
-        if (parts.size != 4) return 0
-        return ((parts[0].toInt() and 0xFF) shl 24) or
-                ((parts[1].toInt() and 0xFF) shl 16) or
-                ((parts[2].toInt() and 0xFF) shl 8) or
-                (parts[3].toInt() and 0xFF)
-    }
-
     data class ExportedNetwork(
         val nwid: String,
         val name: String,
@@ -271,24 +277,46 @@ class ZeroTierManager(private val context: Context) {
 
     private val configListener = VirtualNetworkConfigListener { nwid, op, config ->
         Log.i("ZeroTier", "Config updated for $nwid: $op, status=${config.status}")
+        updateCache(nwid, op, config)
+
         if (config.assignedAddresses != null) {
             val assignedSet = mutableSetOf<String>()
+            val currentSavedIps = prefs.getStringSet("assigned_ips", emptySet()) ?: emptySet()
+            var hasNewIp = false
+
             for (addr in config.assignedAddresses) {
                 val host = addr.address?.hostAddress ?: continue
                 val prefix = addr.port
-                assignedSet.add("$host/$prefix")
+                val entry = "$host/$prefix"
+                assignedSet.add(entry)
+                if (!currentSavedIps.contains(entry)) {
+                    hasNewIp = true
+                }
 
-                val ipLong = (ipStringToInt(host).toLong()) and 0xFFFFFFFFL
+                val ipInt = v4(addr.address) ?: continue
+                val ipLong = ipInt.toLong() and 0xFFFFFFFFL
                 node?.multicastSubscribe(nwid, 0xFFFFFFFFFFFFL, ipLong)
             }
             prefs.edit().putStringSet("assigned_ips", assignedSet).apply()
+
+            // When ZeroTier receives its first IP assignment, restart the VPN to bind the IP to TUN
+            if (hasNewIp) {
+                Log.i("ZeroTier", "New IP assigned ($assignedSet), restarting VPN tunnel to bind address...")
+                val intent = Intent(context, ServiceActionReceiver::class.java).apply {
+                    action = RESTART_ACTION
+                    putExtra(ServiceActionReceiver.EXTRA_MODE, Mode.VPN.name)
+                }
+                context.sendBroadcast(intent)
+            }
         }
         0
     }
 }
 
 object ZeroTierServiceManager {
-    var manager: ZeroTierManager? = null
+    private var manager: ZeroTierManager? = null
+
+    @Synchronized
     fun getInstance(context: Context): ZeroTierManager {
         if (manager == null) {
             manager = ZeroTierManager(context.applicationContext)

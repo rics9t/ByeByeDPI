@@ -99,12 +99,16 @@ internal class NativeSession(
         reply(EngineProtocol.STOPPING)
         handler.postDelayed({ terminate() }, STOP_TIMEOUT)
         startJob?.cancel()
-        ztRouter?.stop()
+
+        // FIX 4: Stop HEV first, join its thread, then stop the router and close fds
         thread(name = "NativeEngineStop") {
             try {
-                if (tunnelThread != null) TProxyService.stopTunnel()
+                if (tunnelThread != null) {
+                    TProxyService.stopTunnel()
+                    tunnelThread?.join()
+                }
+                ztRouter?.stop()
                 proxy?.stopProxy()
-                tunnelThread?.join()
                 proxyThread?.join()
                 tunFd?.close()
             } catch (e: Throwable) {
@@ -205,10 +209,16 @@ internal class NativeSession(
         nativeStarted = true
         startJob = scope.launch {
             try {
+                // FIX 3: Initialize ZeroTier on IO dispatcher before creating the tunnel
+                val ztManager = withContext(Dispatchers.IO) {
+                    ZeroTierServiceManager.getInstance(service)
+                }
+
                 val engine = withContext(Dispatchers.IO) { ByeDpiProxy() }
                 proxy = engine
                 proxyThread = runNative("ByeDPI") { engine.startProxy(config.args.toTypedArray()) }
                 withTimeout(START_TIMEOUT) { awaitProxy(config.host, config.port) }
+
                 createTunnel?.let { create ->
                     val fd = create(config)
                     tunFd = fd
@@ -223,8 +233,6 @@ internal class NativeSession(
                         appendLine("  udp: udp")
                     }
 
-                    // MULTIPLEXER HOOK: Pass virtual socketpair to hev-socks5-tunnel
-                    val ztManager = ZeroTierServiceManager.getInstance(service)
                     val router = TunZeroTierRouter(fd, ztManager)
                     ztRouter = router
                     val hevFd = router.getHevTunnelFd()

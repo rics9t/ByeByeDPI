@@ -49,10 +49,12 @@ class TunZeroTierRouter(
         if (isRunning) return
         isRunning = true
 
+        // Thread 1: Outbound router from Android TUN
         thread(name = "TunRouter-Outbound") {
             val buffer = ByteArray(BUFFER_SIZE)
             while (isRunning) {
                 try {
+                    // With setBlocking(true), this blocks cleanly without EAGAIN CPU spinning
                     val bytesRead = Os.read(realTunFd, buffer, 0, buffer.size)
                     if (bytesRead <= 0) break
 
@@ -63,6 +65,7 @@ class TunZeroTierRouter(
                                 ((buffer[18].toInt() and 0xFF) shl 8) or
                                 (buffer[19].toInt() and 0xFF)
 
+                        // FIX 2: O(1) in-memory route cache lookup (no JNI calls or string allocations)
                         val ztRoute = ztManager.findRouteForIp(destIp)
                         if (ztRoute != null) {
                             val packet = buffer.copyOf(bytesRead)
@@ -74,14 +77,18 @@ class TunZeroTierRouter(
                     synchronized(hevWriteLock) {
                         try {
                             Os.write(sv[0], buffer, 0, bytesRead)
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed writing to hev-socks5-tunnel", e)
+                        }
                     }
-                } catch (_: Exception) {
+                } catch (e: Exception) {
                     if (!isRunning) break
+                    Log.w(TAG, "Error reading from Android TUN", e)
                 }
             }
         }
 
+        // Thread 2: Inbound internet traffic from hev-socks5-tunnel -> Android TUN
         thread(name = "TunRouter-InboundHev") {
             val buffer = ByteArray(BUFFER_SIZE)
             while (isRunning) {
@@ -92,10 +99,13 @@ class TunZeroTierRouter(
                     synchronized(tunWriteLock) {
                         try {
                             Os.write(realTunFd, buffer, 0, bytesRead)
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed writing internet packet to Android TUN", e)
+                        }
                     }
-                } catch (_: Exception) {
+                } catch (e: Exception) {
                     if (!isRunning) break
+                    Log.w(TAG, "Error reading from hev socketpair", e)
                 }
             }
         }
@@ -114,14 +124,13 @@ class TunZeroTierRouter(
             try {
                 Os.write(realTunFd, data, 0, data.size)
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to write ZeroTier packet to TUN", e)
+                Log.w(TAG, "Failed to write ZeroTier packet to TUN", e)
             }
         }
     }
 
     private fun sendToZeroTier(nwid: Long, destIp: Int, packet: ByteArray) {
-        val config = ztManager.getConfigs().firstOrNull { it.nwid == nwid } ?: return
-        val ourMac = config.mac
+        val ourMac = ztManager.getMac(nwid) ?: return
         var destMac = arpTable[destIp]
 
         if (destMac == null) {
@@ -151,8 +160,8 @@ class TunZeroTierRouter(
 
         arpTable[senderIp] = senderMac
 
-        if (opcode == 1) {
-            val config = ztManager.getConfigs().firstOrNull { it.nwid == nwid } ?: return
+        if (opcode == 1) { // ARP Request
+            val ourMac = ztManager.getMac(nwid) ?: return
             val ourAssigned = ztManager.getAssignedIpInts(nwid)
 
             if (ourAssigned.contains(targetIp)) {
@@ -161,7 +170,7 @@ class TunZeroTierRouter(
                 reply[4] = 6; reply[5] = 4
                 reply[6] = 0; reply[7] = 2
 
-                longToMacBytes(config.mac, reply, 8)
+                longToMacBytes(ourMac, reply, 8)
                 ipToBytes(targetIp, reply, 14)
                 longToMacBytes(senderMac, reply, 18)
                 ipToBytes(senderIp, reply, 24)
@@ -170,7 +179,7 @@ class TunZeroTierRouter(
                 ztManager.node?.processVirtualNetworkFrame(
                     System.currentTimeMillis(),
                     nwid,
-                    config.mac,
+                    ourMac,
                     senderMac,
                     0x0806,
                     0,
