@@ -13,7 +13,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "io.github.romanvht.byedpi"
+        applicationId = "com.rics.zerodpi"
         minSdk = 21
         //noinspection OldTargetApi
         targetSdk = 34
