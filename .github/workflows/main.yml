@@ -1,0 +1,63 @@
+name: Build ByeByeDPI
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive 
+
+      - name: Fix Missing Submodules (Fallback)
+        run: |
+          # If the repo was uploaded from a ZIP, submodules will be empty directories.
+          if [ -z "$(ls -A app/src/main/cpp/byedpi 2>/dev/null)" ]; then
+            echo "byedpi submodule is empty. Cloning manually..."
+            rm -rf app/src/main/cpp/byedpi
+            git clone https://github.com/hufrea/byedpi.git app/src/main/cpp/byedpi
+          fi
+          if [ -z "$(ls -A app/src/main/jni/hev-socks5-tunnel 2>/dev/null)" ]; then
+            echo "hev-socks5-tunnel submodule is empty. Cloning manually..."
+            rm -rf app/src/main/jni/hev-socks5-tunnel
+            git clone --recursive https://github.com/heiher/hev-socks5-tunnel.git app/src/main/jni/hev-socks5-tunnel
+          fi
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ByeByeDPI-Release
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ByeByeDPI-Debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
