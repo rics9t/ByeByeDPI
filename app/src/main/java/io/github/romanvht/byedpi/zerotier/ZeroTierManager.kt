@@ -2,6 +2,7 @@ package io.github.romanvht.byedpi.zerotier
 
 import android.content.Context
 import android.content.Intent
+import android.net.VpnService
 import android.util.Log
 import com.google.gson.Gson
 import com.zerotier.sdk.*
@@ -21,6 +22,7 @@ import kotlin.concurrent.thread
 class ZeroTierManager(private val context: Context) {
     var node: Node? = null
     var router: TunZeroTierRouter? = null
+    private var vpnService: VpnService? = null
 
     private val dataStoreDir = File(context.filesDir, "zerotier").apply { mkdirs() }
     private val stateFile = File(context.filesDir, "zerotier_state.json")
@@ -28,7 +30,6 @@ class ZeroTierManager(private val context: Context) {
     private val prefs = context.getSharedPreferences("zerotier_prefs", Context.MODE_PRIVATE)
     private val gson = Gson()
 
-    // FIX 2: Fast, thread-safe in-memory cache for packet routing without per-packet JNI calls
     data class ZtRoute(val nwid: Long, val net: Int, val mask: Int)
     private class NetInfo(val mac: Long, val ips: List<Int>, val routes: List<ZtRoute>)
 
@@ -54,7 +55,7 @@ class ZeroTierManager(private val context: Context) {
         } else {
             val routes = cfg.routes?.mapNotNull { r ->
                 val t = r.target ?: return@mapNotNull null
-                val ip = v4(t.address) ?: return@mapNotNull null // Safely skips IPv6 routes
+                val ip = v4(t.address) ?: return@mapNotNull null
                 val p = t.port
                 if (p !in 1..32) return@mapNotNull null
                 val mask = if (p == 32) -1 else (-1 shl (32 - p))
@@ -75,6 +76,18 @@ class ZeroTierManager(private val context: Context) {
         get() = prefs.getStringSet("enabled_networks", emptySet()) ?: emptySet()
         set(value) = prefs.edit().putStringSet("enabled_networks", value).apply()
 
+    fun bindVpnService(service: VpnService?) {
+        this.vpnService = service
+        socket?.let { s ->
+            try {
+                service?.protect(s)
+                Log.i("ZeroTier", "Successfully protected ZeroTier UDP socket from VPN")
+            } catch (e: Exception) {
+                Log.w("ZeroTier", "Failed to protect socket", e)
+            }
+        }
+    }
+
     fun init() {
         if (node != null) return
         try {
@@ -83,6 +96,7 @@ class ZeroTierManager(private val context: Context) {
             } catch (e: Exception) {
                 socket = DatagramSocket(0)
             }
+            vpnService?.let { s -> socket?.let { sock -> s.protect(sock) } }
 
             node = Node(System.currentTimeMillis())
             node?.init(
@@ -95,10 +109,7 @@ class ZeroTierManager(private val context: Context) {
                 pathChecker
             )
 
-            // Join networks toggled ON
-            enabledNetworks.forEach {
-                try { node?.join(java.math.BigInteger(it, 16).toLong()) } catch (_: Exception) {}
-            }
+            syncNetworks()
 
             thread(name = "ZeroTier-Background") {
                 while (node?.isInited == true) {
@@ -139,30 +150,31 @@ class ZeroTierManager(private val context: Context) {
         }
     }
 
-    fun toggleNetwork(nwid: String, enable: Boolean) {
-        val enabled = enabledNetworks.toMutableSet()
-        if (enable) {
-            enabled.add(nwid)
-            try { node?.join(java.math.BigInteger(nwid, 16).toLong()) } catch (_: Exception) {}
-        } else {
-            enabled.remove(nwid)
-            try { node?.leave(java.math.BigInteger(nwid, 16).toLong()) } catch (_: Exception) {}
+    fun join(networkId: String) {
+        try {
+            val nwidLong = java.math.BigInteger(networkId, 16).toLong()
+            node?.join(nwidLong)
+            Log.i("ZeroTier", "Joined network $networkId ($nwidLong)")
+            saveState()
+        } catch (e: Exception) {
+            Log.e("ZeroTier", "Failed to join network $networkId", e)
         }
-        enabledNetworks = enabled
     }
 
-    fun addNetwork(nwid: String) {
-        val saved = savedNetworks.toMutableSet()
-        saved.add(nwid)
-        savedNetworks = saved
-        toggleNetwork(nwid, true)
+    fun leave(networkId: String) {
+        try {
+            val nwidLong = java.math.BigInteger(networkId, 16).toLong()
+            node?.leave(nwidLong)
+            Log.i("ZeroTier", "Left network $networkId")
+            saveState()
+        } catch (e: Exception) {
+            Log.e("ZeroTier", "Failed to leave network $networkId", e)
+        }
     }
 
-    fun removeNetwork(nwid: String) {
-        toggleNetwork(nwid, false)
-        val saved = savedNetworks.toMutableSet()
-        saved.remove(nwid)
-        savedNetworks = saved
+    fun syncNetworks() {
+        val enabled = enabledNetworks
+        enabled.forEach { join(it) }
     }
 
     fun getConfigs(): List<VirtualNetworkConfig> {
@@ -191,7 +203,7 @@ class ZeroTierManager(private val context: Context) {
         val networks: List<ExportedNetwork>
     )
 
-    private fun saveState() {
+    fun saveState() {
         try {
             val addr = node?.address()?.let { String.format("%010x", it) } ?: "--------"
             val online = node?.status()?.isOnline == true
@@ -263,8 +275,13 @@ class ZeroTierManager(private val context: Context) {
     }
 
     private val eventListener = object : EventListener {
-        override fun onEvent(event: Event?) { Log.i("ZeroTier", "Event: $event") }
-        override fun onTrace(message: String?) { Log.d("ZeroTier", "Trace: $message") }
+        override fun onEvent(event: Event?) {
+            Log.i("ZeroTier", "Event: $event")
+            saveState()
+        }
+        override fun onTrace(message: String?) {
+            Log.d("ZeroTier", "Trace: $message")
+        }
     }
 
     private val frameListener = VirtualNetworkFrameListener { nwid, _, _, etherType, _, frameData ->
@@ -278,6 +295,7 @@ class ZeroTierManager(private val context: Context) {
     private val configListener = VirtualNetworkConfigListener { nwid, op, config ->
         Log.i("ZeroTier", "Config updated for $nwid: $op, status=${config.status}")
         updateCache(nwid, op, config)
+        saveState()
 
         if (config.assignedAddresses != null) {
             val assignedSet = mutableSetOf<String>()
@@ -299,9 +317,8 @@ class ZeroTierManager(private val context: Context) {
             }
             prefs.edit().putStringSet("assigned_ips", assignedSet).apply()
 
-            // When ZeroTier receives its first IP assignment, restart the VPN to bind the IP to TUN
             if (hasNewIp) {
-                Log.i("ZeroTier", "New IP assigned ($assignedSet), restarting VPN tunnel to bind address...")
+                Log.i("ZeroTier", "New IP assigned ($assignedSet), restarting VPN tunnel...")
                 val intent = Intent(context, ServiceActionReceiver::class.java).apply {
                     action = RESTART_ACTION
                     putExtra(ServiceActionReceiver.EXTRA_MODE, Mode.VPN.name)

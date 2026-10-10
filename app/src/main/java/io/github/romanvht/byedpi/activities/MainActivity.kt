@@ -24,6 +24,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.lifecycle.lifecycleScope
+import com.google.gson.Gson
 import io.github.romanvht.byedpi.R
 import io.github.romanvht.byedpi.data.*
 import io.github.romanvht.byedpi.databinding.ActivityMainBinding
@@ -31,6 +32,7 @@ import io.github.romanvht.byedpi.services.ServiceManager
 import io.github.romanvht.byedpi.services.TestService
 import io.github.romanvht.byedpi.services.appStatus
 import io.github.romanvht.byedpi.utility.*
+import io.github.romanvht.byedpi.zerotier.ZeroTierManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
@@ -142,6 +144,13 @@ class MainActivity : BaseActivity() {
         }
     }
 
+    private val ztRefreshRunnable = object : Runnable {
+        override fun run() {
+            updateStatus()
+            binding.proxyAddress.postDelayed(this, 2500)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ServiceManager.refresh(this)
@@ -230,6 +239,13 @@ class MainActivity : BaseActivity() {
             showStrategyPicker()
         }
 
+        // Tap the address / ZeroTier line to open ZeroTier directly
+        binding.proxyAddress.setOnClickListener {
+            val intent = Intent(this, SettingsActivity::class.java)
+            intent.putExtra("open_fragment", "zerotier")
+            startActivity(intent)
+        }
+
         if (!PermissionUtils.hasNotificationPermission(this)) {
             PermissionUtils.requestNotificationPermission(this, 1)
         } else {
@@ -249,6 +265,13 @@ class MainActivity : BaseActivity() {
         ServiceManager.refresh(this)
         updateStatus()
         updateStrategyButton()
+        binding.proxyAddress.removeCallbacks(ztRefreshRunnable)
+        binding.proxyAddress.postDelayed(ztRefreshRunnable, 2000)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        binding.proxyAddress.removeCallbacks(ztRefreshRunnable)
     }
 
     override fun onDestroy() {
@@ -377,6 +400,17 @@ class MainActivity : BaseActivity() {
         ServiceManager.stop()
     }
 
+    private fun loadZeroTierState(): ZeroTierManager.SharedState? {
+        return try {
+            val file = File(filesDir, "zerotier_state.json")
+            if (file.exists()) {
+                Gson().fromJson(file.readText(), ZeroTierManager.SharedState::class.java)
+            } else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun updateStatus() {
         val (status, mode) = appStatus
 
@@ -384,8 +418,25 @@ class MainActivity : BaseActivity() {
 
         val preferences = getPreferences()
         val (ip, port) = preferences.getProxyIpAndPort()
+        val proxyText = getString(R.string.proxy_address, ip, port)
 
-        binding.proxyAddress.text = getString(R.string.proxy_address, ip, port)
+        // Live ZeroTier Status on the Home Screen
+        val ztState = loadZeroTierState()
+        val ztText = when {
+            status != AppStatus.Running -> "Not connected to ZeroTier (OFFLINE)"
+            ztState != null && ztState.isOnline -> {
+                val okNets = ztState.networks.filter { it.status == "OK" }
+                if (okNets.isNotEmpty()) {
+                    "Connected to ZeroTier (ONLINE: ${okNets.joinToString { it.name }})"
+                } else {
+                    "Connected to ZeroTier (ONLINE - ${ztState.nodeAddress})"
+                }
+            }
+            status == AppStatus.Running -> "ZeroTier: Connecting..."
+            else -> "Not connected to ZeroTier (OFFLINE)"
+        }
+
+        binding.proxyAddress.text = "$proxyText\n$ztText"
 
         when (status) {
             AppStatus.Halted -> {

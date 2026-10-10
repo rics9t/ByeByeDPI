@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
@@ -18,6 +19,8 @@ import io.github.romanvht.byedpi.activities.MainActivity
 import io.github.romanvht.byedpi.data.*
 import io.github.romanvht.byedpi.receiver.ServiceActionReceiver
 import io.github.romanvht.byedpi.utility.*
+import io.github.romanvht.byedpi.zerotier.ZeroTierActionReceiver
+import io.github.romanvht.byedpi.zerotier.ZeroTierServiceManager
 
 @SuppressLint("VpnServicePolicy")
 class ByeDpiVpnService : VpnService() {
@@ -29,14 +32,23 @@ class ByeDpiVpnService : VpnService() {
     }
 
     private val session by lazy { NativeSession(this, ::createTunnel) }
+    private val ztReceiver = ZeroTierActionReceiver()
 
     override fun onCreate() {
         super.onCreate()
         registerNotificationChannel(this, NOTIFICATION_CHANNEL_ID, R.string.vpn_channel_name)
+
+        val filter = IntentFilter(ZeroTierActionReceiver.ACTION_ZT)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(ztReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(ztReceiver, filter)
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        try { unregisterReceiver(ztReceiver) } catch (_: Exception) {}
         session.destroy()
     }
 
@@ -100,8 +112,6 @@ class ByeDpiVpnService : VpnService() {
         Log.d(TAG, "DNS: ${configuration.dns}")
         val builder = Builder()
         builder.setSession("ByeDPI")
-
-        // FIX 1: Make the TUN fd blocking so read loop doesn't spin on EAGAIN at 100% CPU
         builder.setBlocking(true)
 
         builder.setConfigureIntent(
@@ -115,6 +125,10 @@ class ByeDpiVpnService : VpnService() {
 
         builder.addAddress("10.10.10.10", 32)
             .addRoute("0.0.0.0", 0)
+
+        // Protect ZeroTier UDP socket from the VPN tunnel
+        val ztManager = ZeroTierServiceManager.getInstance(this)
+        ztManager.bindVpnService(this)
 
         // Bind assigned ZeroTier addresses to TUN
         val ztPrefs = getSharedPreferences("zerotier_prefs", Context.MODE_PRIVATE)

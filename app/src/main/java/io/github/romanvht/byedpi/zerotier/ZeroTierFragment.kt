@@ -1,6 +1,7 @@
 package io.github.romanvht.byedpi.zerotier
 
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
@@ -15,8 +16,10 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.gson.Gson
 import io.github.romanvht.byedpi.R
-import io.github.romanvht.byedpi.services.appStatus
 import io.github.romanvht.byedpi.data.AppStatus
+import io.github.romanvht.byedpi.data.Mode
+import io.github.romanvht.byedpi.services.ServiceManager
+import io.github.romanvht.byedpi.services.appStatus
 import java.io.File
 
 class ZeroTierFragment : Fragment() {
@@ -41,6 +44,15 @@ class ZeroTierFragment : Fragment() {
         fun getSaved(): Set<String> = prefs.getStringSet("saved_networks", emptySet()) ?: emptySet()
         fun getEnabled(): Set<String> = prefs.getStringSet("enabled_networks", emptySet()) ?: emptySet()
 
+        fun sendZtBroadcast(op: String, nwid: String) {
+            val intent = Intent(ZeroTierActionReceiver.ACTION_ZT).apply {
+                setPackage(requireContext().packageName)
+                putExtra(ZeroTierActionReceiver.EXTRA_OP, op)
+                putExtra(ZeroTierActionReceiver.EXTRA_NWID, nwid)
+            }
+            requireContext().sendBroadcast(intent)
+        }
+
         val recyclerView = view.findViewById<RecyclerView>(R.id.recyclerView)
         adapter = ZeroTierAdapter(
             getSaved().toMutableList(),
@@ -49,6 +61,12 @@ class ZeroTierFragment : Fragment() {
                 val set = getEnabled().toMutableSet()
                 if (enable) set.add(nwid) else set.remove(nwid)
                 prefs.edit().putStringSet("enabled_networks", set).apply()
+
+                if (appStatus.first == AppStatus.Running) {
+                    sendZtBroadcast(if (enable) "join" else "leave", nwid)
+                } else if (enable) {
+                    Toast.makeText(requireContext(), "Network enabled. Connect VPN to start ZeroTier.", Toast.LENGTH_SHORT).show()
+                }
             },
             onClick = { nwid, _ ->
                 val state = loadState()
@@ -85,6 +103,9 @@ class ZeroTierFragment : Fragment() {
                             .putStringSet("enabled_networks", enabled)
                             .apply()
                         adapter.removeNetwork(nwid)
+                        if (appStatus.first == AppStatus.Running) {
+                            sendZtBroadcast("leave", nwid)
+                        }
                     }
                     .setNegativeButton("No", null)
                     .show()
@@ -111,6 +132,20 @@ class ZeroTierFragment : Fragment() {
                             .putStringSet("enabled_networks", enabled)
                             .apply()
                         adapter.addNetwork(nwid)
+
+                        if (appStatus.first == AppStatus.Running) {
+                            sendZtBroadcast("join", nwid)
+                            Toast.makeText(requireContext(), "Joining network $nwid...", Toast.LENGTH_SHORT).show()
+                        } else {
+                            AlertDialog.Builder(requireContext())
+                                .setTitle("Start Connection?")
+                                .setMessage("Connect VPN now so ZeroTier can send the join request to the controller?")
+                                .setPositiveButton("Connect Now") { _, _ ->
+                                    ServiceManager.start(requireContext(), Mode.VPN)
+                                }
+                                .setNegativeButton("Later", null)
+                                .show()
+                        }
                     } else {
                         Toast.makeText(requireContext(), "Invalid 16-character Network ID", Toast.LENGTH_SHORT).show()
                     }
