@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.VpnService
@@ -111,6 +112,23 @@ class ByeDpiVpnService : VpnService() {
         builder.addAddress("10.10.10.10", 32)
             .addRoute("0.0.0.0", 0)
 
+        // BIND ZEROTIER ADDRESSES: Allows Android kernel to own and ping your ZeroTier IPs
+        val ztPrefs = getSharedPreferences("zerotier_prefs", Context.MODE_PRIVATE)
+        val ztAssigned = ztPrefs.getStringSet("assigned_ips", emptySet()) ?: emptySet()
+        for (item in ztAssigned) {
+            val parts = item.split("/")
+            if (parts.size == 2) {
+                val ip = parts[0]
+                val prefix = parts[1].toIntOrNull() ?: 24
+                try {
+                    builder.addAddress(ip, prefix)
+                    Log.i(TAG, "Bound ZeroTier IP to VPN: $ip/$prefix")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not add ZeroTier IP $item", e)
+                }
+            }
+        }
+
         if (configuration.ipv6) {
             builder.addAddress("fd00::1", 128)
                 .addRoute("::", 0)
@@ -130,23 +148,20 @@ class ByeDpiVpnService : VpnService() {
                     try {
                         builder.addDisallowedApplication(packageName)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Не удалось добавить приложение $packageName в черный список", e)
+                        Log.e(TAG, "Failed to add $packageName to blacklist", e)
                     }
                 }
-
                 builder.addDisallowedApplication(applicationContext.packageName)
             }
-
             "whitelist" -> {
                 for (packageName in configuration.apps) {
                     try {
                         builder.addAllowedApplication(packageName)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Не удалось добавить приложение $packageName в белый список", e)
+                        Log.e(TAG, "Failed to add $packageName to whitelist", e)
                     }
                 }
             }
-
             "disable" -> {
                 builder.addDisallowedApplication(applicationContext.packageName)
             }

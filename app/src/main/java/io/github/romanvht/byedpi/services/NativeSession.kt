@@ -13,6 +13,8 @@ import android.util.Log
 import io.github.romanvht.byedpi.core.ByeDpiProxy
 import io.github.romanvht.byedpi.core.TProxyService
 import io.github.romanvht.byedpi.data.Configuration
+import io.github.romanvht.byedpi.zerotier.TunZeroTierRouter
+import io.github.romanvht.byedpi.zerotier.ZeroTierServiceManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -58,6 +60,7 @@ internal class NativeSession(
     private var proxyThread: Thread? = null
     private var tunnelThread: Thread? = null
     private var tunFd: ParcelFileDescriptor? = null
+    private var ztRouter: TunZeroTierRouter? = null
     private var startJob: Job? = null
 
     val binder: IBinder get() = messenger.binder
@@ -96,6 +99,7 @@ internal class NativeSession(
         reply(EngineProtocol.STOPPING)
         handler.postDelayed({ terminate() }, STOP_TIMEOUT)
         startJob?.cancel()
+        ztRouter?.stop()
         thread(name = "NativeEngineStop") {
             try {
                 if (tunnelThread != null) TProxyService.stopTunnel()
@@ -218,7 +222,15 @@ internal class NativeSession(
                         appendLine("  port: ${config.port}")
                         appendLine("  udp: udp")
                     }
-                    tunnelThread = runNative("HEV") { TProxyService.startTunnel(tunnelConfig, fd.fd) }
+
+                    // MULTIPLEXER HOOK: Pass virtual socketpair to hev-socks5-tunnel
+                    val ztManager = ZeroTierServiceManager.getInstance(service)
+                    val router = TunZeroTierRouter(fd, ztManager)
+                    ztRouter = router
+                    val hevFd = router.getHevTunnelFd()
+
+                    tunnelThread = runNative("HEV") { TProxyService.startTunnel(tunnelConfig, hevFd) }
+                    router.start()
                     delay(100)
                 }
                 if (state != EngineProtocol.STATE_STOPPING) {
