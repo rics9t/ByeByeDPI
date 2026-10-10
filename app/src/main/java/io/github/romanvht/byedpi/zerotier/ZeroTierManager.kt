@@ -97,7 +97,7 @@ class ZeroTierManager(private val context: Context) {
 
     private val packetSender = PacketSender { localSocket, remoteAddr, packetData, ttl ->
         try {
-            socket.send(DatagramPacket(packetData, packetData.length, remoteAddr))
+            socket.send(DatagramPacket(packetData, packetData.size, remoteAddr))
             0
         } catch (e: Exception) { -1 }
     }
