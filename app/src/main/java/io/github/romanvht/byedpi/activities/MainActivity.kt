@@ -239,7 +239,7 @@ class MainActivity : BaseActivity() {
             showStrategyPicker()
         }
 
-        // Tap the address / ZeroTier line to open ZeroTier directly
+        // Tap the status block to open ZeroTier directly
         binding.proxyAddress.setOnClickListener {
             val intent = Intent(this, SettingsActivity::class.java)
             intent.putExtra("open_fragment", "zerotier")
@@ -420,20 +420,29 @@ class MainActivity : BaseActivity() {
         val (ip, port) = preferences.getProxyIpAndPort()
         val proxyText = getString(R.string.proxy_address, ip, port)
 
-        // Live ZeroTier Status on the Home Screen
+        val ztPrefs = getSharedPreferences("zerotier_prefs", Context.MODE_PRIVATE)
+        val enabledNets = ztPrefs.getStringSet("enabled_networks", emptySet()) ?: emptySet()
         val ztState = loadZeroTierState()
+
         val ztText = when {
-            status != AppStatus.Running -> "Not connected to ZeroTier (OFFLINE)"
+            enabledNets.isEmpty() -> "ZeroTier: Disabled"
+            status != AppStatus.Running -> "ZeroTier: OFFLINE (VPN stopped)"
             ztState != null && ztState.isOnline -> {
                 val okNets = ztState.networks.filter { it.status == "OK" }
                 if (okNets.isNotEmpty()) {
-                    "Connected to ZeroTier (ONLINE: ${okNets.joinToString { it.name }})"
+                    "ZeroTier: ONLINE (${okNets.joinToString { it.name }})"
                 } else {
-                    "Connected to ZeroTier (ONLINE - ${ztState.nodeAddress})"
+                    val requesting = ztState.networks.any { it.status.contains("REQUESTING") }
+                    val denied = ztState.networks.any { it.status.contains("DENIED") }
+                    when {
+                        denied -> "ZeroTier: Access Denied (Authorize in controller)"
+                        requesting -> "ZeroTier: Requesting configuration..."
+                        else -> "ZeroTier: ONLINE (${ztState.nodeAddress})"
+                    }
                 }
             }
             status == AppStatus.Running -> "ZeroTier: Connecting..."
-            else -> "Not connected to ZeroTier (OFFLINE)"
+            else -> "ZeroTier: OFFLINE"
         }
 
         binding.proxyAddress.text = "$proxyText\n$ztText"

@@ -30,6 +30,9 @@ class ZeroTierManager(private val context: Context) {
     private val prefs = context.getSharedPreferences("zerotier_prefs", Context.MODE_PRIVATE)
     private val gson = Gson()
 
+    @Volatile private var isOnline = false
+    @Volatile private var cachedAddress: Long? = null
+
     data class ZtRoute(val nwid: Long, val net: Int, val mask: Int)
     private class NetInfo(val mac: Long, val ips: List<Int>, val routes: List<ZtRoute>)
 
@@ -76,12 +79,14 @@ class ZeroTierManager(private val context: Context) {
         get() = prefs.getStringSet("enabled_networks", emptySet()) ?: emptySet()
         set(value) = prefs.edit().putStringSet("enabled_networks", value).apply()
 
+    fun isAvailable(): Boolean = node != null && (node?.isInited == true)
+
     fun bindVpnService(service: VpnService?) {
         this.vpnService = service
         socket?.let { s ->
             try {
                 service?.protect(s)
-                Log.i("ZeroTier", "Successfully protected ZeroTier UDP socket from VPN")
+                Log.i("ZeroTier", "Protected ZeroTier UDP socket from VPN")
             } catch (e: Exception) {
                 Log.w("ZeroTier", "Failed to protect socket", e)
             }
@@ -93,13 +98,16 @@ class ZeroTierManager(private val context: Context) {
         try {
             try {
                 socket = DatagramSocket(9993)
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 socket = DatagramSocket(0)
             }
             vpnService?.let { s -> socket?.let { sock -> s.protect(sock) } }
 
-            node = Node(System.currentTimeMillis())
-            node?.init(
+            val now = System.currentTimeMillis()
+            val n = Node(now)
+            node = n
+
+            val res = n.init(
                 getListener,
                 putListener,
                 packetSender,
@@ -109,7 +117,20 @@ class ZeroTierManager(private val context: Context) {
                 pathChecker
             )
 
+            if (res != ResultCode.RESULT_OK) {
+                Log.e("ZeroTier", "Node init failed with code: $res")
+                return
+            }
+
+            // Safe to query address only AFTER init() has completed
+            try {
+                cachedAddress = n.address()
+            } catch (e: Exception) {
+                Log.w("ZeroTier", "Address query deferred", e)
+            }
+
             syncNetworks()
+            saveState()
 
             thread(name = "ZeroTier-Background") {
                 while (node?.isInited == true) {
@@ -119,8 +140,10 @@ class ZeroTierManager(private val context: Context) {
                         saveState()
                         val sleepTime = (deadline[0] - System.currentTimeMillis()).coerceIn(50, 1000)
                         if (sleepTime > 0) Thread.sleep(sleepTime)
-                    } catch (e: Exception) {
-                        try { Thread.sleep(500) } catch (_: InterruptedException) {}
+                    } catch (_: InterruptedException) {
+                        break
+                    } catch (_: Exception) {
+                        try { Thread.sleep(500) } catch (_: InterruptedException) { break }
                     }
                 }
             }
@@ -140,8 +163,10 @@ class ZeroTierManager(private val context: Context) {
                         val deadline = LongArray(1)
                         val addr = packet.socketAddress as InetSocketAddress
                         node?.processWirePacket(System.currentTimeMillis(), -1, addr, data, deadline)
-                    } catch (e: Exception) {
-                        try { Thread.sleep(100) } catch (_: InterruptedException) {}
+                    } catch (_: InterruptedException) {
+                        break
+                    } catch (_: Exception) {
+                        try { Thread.sleep(100) } catch (_: InterruptedException) { break }
                     }
                 }
             }
@@ -155,7 +180,6 @@ class ZeroTierManager(private val context: Context) {
             val nwidLong = java.math.BigInteger(networkId, 16).toLong()
             node?.join(nwidLong)
             Log.i("ZeroTier", "Joined network $networkId ($nwidLong)")
-            saveState()
         } catch (e: Exception) {
             Log.e("ZeroTier", "Failed to join network $networkId", e)
         }
@@ -166,21 +190,20 @@ class ZeroTierManager(private val context: Context) {
             val nwidLong = java.math.BigInteger(networkId, 16).toLong()
             node?.leave(nwidLong)
             Log.i("ZeroTier", "Left network $networkId")
-            saveState()
         } catch (e: Exception) {
             Log.e("ZeroTier", "Failed to leave network $networkId", e)
         }
     }
 
     fun syncNetworks() {
-        val enabled = enabledNetworks
-        enabled.forEach { join(it) }
+        enabledNetworks.forEach { join(it) }
     }
 
     fun getConfigs(): List<VirtualNetworkConfig> {
         return try {
-            node?.networkConfigs()?.toList() ?: emptyList()
-        } catch (e: Exception) {
+            if (node?.isInited == true) node?.networkConfigs()?.toList() ?: emptyList()
+            else emptyList()
+        } catch (_: Exception) {
             emptyList()
         }
     }
@@ -203,10 +226,16 @@ class ZeroTierManager(private val context: Context) {
         val networks: List<ExportedNetwork>
     )
 
+    @Synchronized
     fun saveState() {
+        val n = node ?: return
+        if (!n.isInited) return
         try {
-            val addr = node?.address()?.let { String.format("%010x", it) } ?: "--------"
-            val online = node?.status()?.isOnline == true
+            if (cachedAddress == null) {
+                try { cachedAddress = n.address() } catch (_: Exception) {}
+            }
+            val addr = cachedAddress?.let { String.format("%010x", it) } ?: "--------"
+            val online = isOnline || (try { n.status()?.isOnline == true } catch (_: Exception) { false })
             val exported = getConfigs().map { cfg ->
                 ExportedNetwork(
                     nwid = String.format("%016x", cfg.nwid),
@@ -222,7 +251,9 @@ class ZeroTierManager(private val context: Context) {
             }
             val json = gson.toJson(SharedState(addr, online, exported))
             stateFile.writeText(json)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.w("ZeroTier", "Could not write state", e)
+        }
     }
 
     private val getListener = DataStoreGetListener { name, out_buffer ->
@@ -233,7 +264,7 @@ class ZeroTierManager(private val context: Context) {
             val len = Math.min(data.size, out_buffer.size)
             System.arraycopy(data, 0, out_buffer, 0, len)
             len.toLong()
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             -2
         }
     }
@@ -256,7 +287,7 @@ class ZeroTierManager(private val context: Context) {
                 val file = File(dataStoreDir, name)
                 if (file.exists()) file.delete()
                 0
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 -1
             }
         }
@@ -266,7 +297,7 @@ class ZeroTierManager(private val context: Context) {
         try {
             socket?.send(DatagramPacket(packetData, packetData.size, remoteAddr))
             0
-        } catch (e: Exception) { -1 }
+        } catch (_: Exception) { -1 }
     }
 
     private val pathChecker = object : PathChecker {
@@ -274,10 +305,15 @@ class ZeroTierManager(private val context: Context) {
         override fun onPathLookup(ztAddress: Long, ss_family: Int): InetSocketAddress? = null
     }
 
+    // FIX: DO NOT call native JNI methods (like saveState/address) inside callbacks!
     private val eventListener = object : EventListener {
         override fun onEvent(event: Event?) {
             Log.i("ZeroTier", "Event: $event")
-            saveState()
+            when (event) {
+                Event.EVENT_UP, Event.EVENT_ONLINE -> isOnline = true
+                Event.EVENT_OFFLINE, Event.EVENT_DOWN -> isOnline = false
+                else -> {}
+            }
         }
         override fun onTrace(message: String?) {
             Log.d("ZeroTier", "Trace: $message")
@@ -295,7 +331,6 @@ class ZeroTierManager(private val context: Context) {
     private val configListener = VirtualNetworkConfigListener { nwid, op, config ->
         Log.i("ZeroTier", "Config updated for $nwid: $op, status=${config.status}")
         updateCache(nwid, op, config)
-        saveState()
 
         if (config.assignedAddresses != null) {
             val assignedSet = mutableSetOf<String>()

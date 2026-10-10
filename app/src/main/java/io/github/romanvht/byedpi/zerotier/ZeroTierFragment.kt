@@ -17,8 +17,6 @@ import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.gson.Gson
 import io.github.romanvht.byedpi.R
 import io.github.romanvht.byedpi.data.AppStatus
-import io.github.romanvht.byedpi.data.Mode
-import io.github.romanvht.byedpi.services.ServiceManager
 import io.github.romanvht.byedpi.services.appStatus
 import java.io.File
 
@@ -64,17 +62,23 @@ class ZeroTierFragment : Fragment() {
 
                 if (appStatus.first == AppStatus.Running) {
                     sendZtBroadcast(if (enable) "join" else "leave", nwid)
-                } else if (enable) {
-                    Toast.makeText(requireContext(), "Network enabled. Connect VPN to start ZeroTier.", Toast.LENGTH_SHORT).show()
                 }
             },
             onClick = { nwid, _ ->
                 val state = loadState()
                 val net = state?.networks?.firstOrNull { it.nwid.equals(nwid, ignoreCase = true) }
+                val isEnabled = getEnabled().contains(nwid)
+                val statusStr = when {
+                    !isEnabled -> "DISABLED"
+                    net != null -> net.status
+                    appStatus.first == AppStatus.Running -> "REQUESTING_CONFIGURATION"
+                    else -> "OFFLINE (VPN stopped)"
+                }
+
                 val details = """
                     Network ID: $nwid
                     Network Name: ${net?.name ?: "-"}
-                    Status: ${net?.status ?: if (getEnabled().contains(nwid)) "REQUESTING_CONFIGURATION" else "DISABLED"}
+                    Status: $statusStr
                     Type: ${net?.type ?: "-"}
                     MAC: ${net?.mac ?: "-"}
                     MTU: ${net?.mtu ?: "-"}
@@ -132,19 +136,10 @@ class ZeroTierFragment : Fragment() {
                             .putStringSet("enabled_networks", enabled)
                             .apply()
                         adapter.addNetwork(nwid)
+                        Toast.makeText(requireContext(), "Network added", Toast.LENGTH_SHORT).show()
 
                         if (appStatus.first == AppStatus.Running) {
                             sendZtBroadcast("join", nwid)
-                            Toast.makeText(requireContext(), "Joining network $nwid...", Toast.LENGTH_SHORT).show()
-                        } else {
-                            AlertDialog.Builder(requireContext())
-                                .setTitle("Start Connection?")
-                                .setMessage("Connect VPN now so ZeroTier can send the join request to the controller?")
-                                .setPositiveButton("Connect Now") { _, _ ->
-                                    ServiceManager.start(requireContext(), Mode.VPN)
-                                }
-                                .setNegativeButton("Later", null)
-                                .show()
                         }
                     } else {
                         Toast.makeText(requireContext(), "Invalid 16-character Network ID", Toast.LENGTH_SHORT).show()
@@ -163,7 +158,7 @@ class ZeroTierFragment : Fragment() {
                 if (!isVpnRunning) {
                     nodeStatusText.text = "VPN is Disconnected (Start VPN on home screen)"
                 } else if (state != null) {
-                    nodeStatusText.text = "Node: ${state.nodeAddress}  |  Status: ${if (state.isOnline) "ONLINE" else "OFFLINE"}"
+                    nodeStatusText.text = "Node: ${state.nodeAddress}  |  Status: ${if (state.isOnline) "ONLINE" else "CONNECTING..."}"
                 } else {
                     nodeStatusText.text = "Connecting to ZeroTier..."
                 }

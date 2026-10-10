@@ -100,7 +100,6 @@ internal class NativeSession(
         handler.postDelayed({ terminate() }, STOP_TIMEOUT)
         startJob?.cancel()
 
-        // FIX 4: Stop HEV first, join its thread, then stop the router and close fds
         thread(name = "NativeEngineStop") {
             try {
                 if (tunnelThread != null) {
@@ -209,9 +208,14 @@ internal class NativeSession(
         nativeStarted = true
         startJob = scope.launch {
             try {
-                // FIX 3: Initialize ZeroTier on IO dispatcher before creating the tunnel
+                // Initialize ZeroTier on background thread safely
                 val ztManager = withContext(Dispatchers.IO) {
-                    ZeroTierServiceManager.getInstance(service)
+                    try {
+                        ZeroTierServiceManager.getInstance(service)
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "ZeroTier init error, continuing with ByeDPI only", e)
+                        null
+                    }
                 }
 
                 val engine = withContext(Dispatchers.IO) { ByeDpiProxy() }
@@ -233,12 +237,21 @@ internal class NativeSession(
                         appendLine("  udp: udp")
                     }
 
-                    val router = TunZeroTierRouter(fd, ztManager)
-                    ztRouter = router
-                    val hevFd = router.getHevTunnelFd()
-
-                    tunnelThread = runNative("HEV") { TProxyService.startTunnel(tunnelConfig, hevFd) }
-                    router.start()
+                    // FALLBACK PROTECTION: If ZeroTier is available, route packets. Otherwise direct to ByeDPI
+                    if (ztManager != null && ztManager.isAvailable()) {
+                        try {
+                            val router = TunZeroTierRouter(fd, ztManager)
+                            ztRouter = router
+                            val hevFd = router.getHevTunnelFd()
+                            tunnelThread = runNative("HEV") { TProxyService.startTunnel(tunnelConfig, hevFd) }
+                            router.start()
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Router failed, falling back directly to ByeDPI", e)
+                            tunnelThread = runNative("HEV") { TProxyService.startTunnel(tunnelConfig, fd.fd) }
+                        }
+                    } else {
+                        tunnelThread = runNative("HEV") { TProxyService.startTunnel(tunnelConfig, fd.fd) }
+                    }
                     delay(100)
                 }
                 if (state != EngineProtocol.STATE_STOPPING) {
