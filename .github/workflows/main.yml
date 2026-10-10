@@ -1,0 +1,53 @@
+name: Build ByeByeDPI
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          # Required to clone hev-socks5-tunnel and byedpi C/C++ sources
+          submodules: recursive 
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Release APK
+        # This will trigger CMake and ndk-build for the native libraries, 
+        # then compile the Java/Kotlin code and package the APK.
+        run: ./gradlew assembleRelease
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload Release APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ByeByeDPI-Release
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
+
+      - name: Upload Debug APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ByeByeDPI-Debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
