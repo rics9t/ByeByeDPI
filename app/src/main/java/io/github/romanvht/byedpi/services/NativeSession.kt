@@ -210,7 +210,10 @@ internal class NativeSession(
             try {
                 val ztManager = withContext(Dispatchers.IO) {
                     try {
-                        ZeroTierServiceManager.getInstance(service)
+                        ZeroTierServiceManager.getInstance(service).also {
+                            // init off the main thread; protects the ZT socket via the VpnService
+                            it.init(service as? android.net.VpnService)
+                        }
                     } catch (e: Throwable) {
                         Log.e(TAG, "ZeroTier init error, continuing with ByeDPI only", e)
                         null
@@ -245,6 +248,8 @@ internal class NativeSession(
                             router.start()
                         } catch (e: Exception) {
                             Log.e(TAG, "Router failed, falling back directly to ByeDPI", e)
+                            try { ztRouter?.stop() } catch (_: Throwable) {}
+                            ztRouter = null
                             tunnelThread = runNative("HEV") { TProxyService.startTunnel(tunnelConfig, fd.fd) }
                         }
                     } else {

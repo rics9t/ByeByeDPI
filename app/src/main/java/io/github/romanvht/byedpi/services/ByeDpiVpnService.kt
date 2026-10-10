@@ -126,9 +126,7 @@ class ByeDpiVpnService : VpnService() {
         builder.addAddress("10.10.10.10", 32)
             .addRoute("0.0.0.0", 0)
 
-        // Initialize ZeroTier with this VpnService so its socket is protected immediately
-        val ztManager = ZeroTierServiceManager.getInstance(this)
-        ztManager.init(this)
+        // ZeroTier is initialized in NativeSession (IO thread) before this is called
 
         // Bind assigned ZeroTier addresses to TUN
         val ztPrefs = getSharedPreferences("zerotier_prefs", Context.MODE_PRIVATE)
