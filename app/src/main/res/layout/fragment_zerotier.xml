@@ -21,4 +21,22 @@
         android:contentDescription="Add Network"
         app:srcCompat="@android:drawable/ic_input_add" />
 
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
+        android:layout_alignParentStart="true"
+        android:layout_margin="16dp"
+        android:padding="8dp"
+        android:background="?android:attr/colorBackgroundFloating"
+        android:elevation="4dp">
+        <TextView
+            android:id="@+id/nodeStatusText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="12sp"
+            android:fontFamily="monospace"
+            android:text="Node: Loading..." />
+    </LinearLayout>
+
 </RelativeLayout>

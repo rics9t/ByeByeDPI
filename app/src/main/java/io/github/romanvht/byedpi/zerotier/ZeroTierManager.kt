@@ -6,20 +6,33 @@ import com.zerotier.sdk.*
 import java.io.File
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.InetSocketAddress
+import kotlin.concurrent.thread
 
 class ZeroTierManager(private val context: Context) {
-    private var node: Node? = null
+    var node: Node? = null
     private val dataStoreDir = File(context.filesDir, "zerotier").apply { mkdirs() }
-    private val socket = DatagramSocket()
+    private var socket: DatagramSocket? = null
     private val prefs = context.getSharedPreferences("zerotier_prefs", Context.MODE_PRIVATE)
 
-    var networks: Set<String>
-        get() = prefs.getStringSet("networks", emptySet()) ?: emptySet()
-        set(value) = prefs.edit().putStringSet("networks", value).apply()
+    var savedNetworks: Set<String>
+        get() = prefs.getStringSet("saved_networks", emptySet()) ?: emptySet()
+        set(value) = prefs.edit().putStringSet("saved_networks", value).apply()
+
+    var enabledNetworks: Set<String>
+        get() = prefs.getStringSet("enabled_networks", emptySet()) ?: emptySet()
+        set(value) = prefs.edit().putStringSet("enabled_networks", value).apply()
 
     fun init() {
         if (node != null) return
         try {
+            // Bind to default ZT port, or ephemeral if in use
+            try {
+                socket = DatagramSocket(9993)
+            } catch (e: Exception) {
+                socket = DatagramSocket(0)
+            }
+
             node = Node(System.currentTimeMillis())
             node?.init(
                 getListener,
@@ -28,43 +41,69 @@ class ZeroTierManager(private val context: Context) {
                 eventListener,
                 frameListener,
                 configListener,
-                null
+                pathChecker
             )
-            
-            networks.forEach {
-                try {
-                    node?.join(it.toLong(16))
-                } catch (e: Exception) {}
+
+            // Join networks that are toggled "ON"
+            enabledNetworks.forEach {
+                try { node?.join(it.toLong(16)) } catch (e: Exception) {}
             }
 
-            Thread {
+            // ZeroTier Background Task Loop
+            thread(name = "ZeroTier-Background") {
                 while (node?.isInited == true) {
                     val deadline = LongArray(1)
                     node?.processBackgroundTasks(System.currentTimeMillis(), deadline)
-                    Thread.sleep(1000)
+                    val sleepTime = (deadline[0] - System.currentTimeMillis()).coerceIn(50, 1000)
+                    if (sleepTime > 0) Thread.sleep(sleepTime)
                 }
-            }.start()
+            }
+
+            // ZeroTier UDP Packet Receive Loop
+            thread(name = "ZeroTier-UDP") {
+                val buf = ByteArray(65536)
+                val packet = DatagramPacket(buf, buf.size)
+                while (node?.isInited == true) {
+                    try {
+                        socket?.receive(packet)
+                        val data = packet.data.copyOf(packet.length)
+                        val deadline = LongArray(1)
+                        val addr = packet.socketAddress as InetSocketAddress
+                        node?.processWirePacket(System.currentTimeMillis(), -1, addr, data, deadline)
+                    } catch (e: Exception) {
+                        // Ignore read timeouts/socket closures
+                    }
+                }
+            }
         } catch (e: Throwable) {
-            Log.e("ZeroTier", "Failed to init ZeroTier. Is libZeroTierOneJNI.so missing?", e)
+            Log.e("ZeroTier", "Failed to init ZeroTier", e)
         }
     }
 
-    fun join(networkId: String) {
-        val mut = networks.toMutableSet()
-        mut.add(networkId)
-        networks = mut
-        try {
-            node?.join(networkId.toLong(16))
-        } catch (e: Exception) {}
+    fun toggleNetwork(nwid: String, enable: Boolean) {
+        val enabled = enabledNetworks.toMutableSet()
+        if (enable) {
+            enabled.add(nwid)
+            try { node?.join(nwid.toLong(16)) } catch (e: Exception) {}
+        } else {
+            enabled.remove(nwid)
+            try { node?.leave(nwid.toLong(16)) } catch (e: Exception) {}
+        }
+        enabledNetworks = enabled
     }
 
-    fun leave(networkId: String) {
-        val mut = networks.toMutableSet()
-        mut.remove(networkId)
-        networks = mut
-        try {
-            node?.leave(networkId.toLong(16))
-        } catch (e: Exception) {}
+    fun addNetwork(nwid: String) {
+        val saved = savedNetworks.toMutableSet()
+        saved.add(nwid)
+        savedNetworks = saved
+        toggleNetwork(nwid, true)
+    }
+
+    fun removeNetwork(nwid: String) {
+        toggleNetwork(nwid, false)
+        val saved = savedNetworks.toMutableSet()
+        saved.remove(nwid)
+        savedNetworks = saved
     }
 
     fun getConfigs(): List<VirtualNetworkConfig> {
@@ -95,11 +134,17 @@ class ZeroTierManager(private val context: Context) {
         }
     }
 
-    private val packetSender = PacketSender { localSocket, remoteAddr, packetData, ttl ->
+    private val packetSender = PacketSender { _, remoteAddr, packetData, _ ->
         try {
-            socket.send(DatagramPacket(packetData, packetData.size, remoteAddr))
+            socket?.send(DatagramPacket(packetData, packetData.size, remoteAddr))
             0
         } catch (e: Exception) { -1 }
+    }
+
+    // Tells ZeroTier it's allowed to send packets to the designated IPs
+    private val pathChecker = object : PathChecker {
+        override fun onPathCheck(ztAddress: Long, localSocket: Long, remoteAddress: InetSocketAddress?): Boolean = true
+        override fun onPathLookup(ztAddress: Long, ss_family: Int): InetSocketAddress? = null
     }
 
     private val eventListener = object : EventListener {
@@ -107,9 +152,9 @@ class ZeroTierManager(private val context: Context) {
         override fun onTrace(message: String?) { Log.d("ZeroTier", "Trace: $message") }
     }
 
-    private val frameListener = VirtualNetworkFrameListener { nwid, srcMac, destMac, etherType, vlanId, frameData -> }
+    private val frameListener = VirtualNetworkFrameListener { _, _, _, _, _, _ -> }
 
-    private val configListener = VirtualNetworkConfigListener { nwid, op, config ->
+    private val configListener = VirtualNetworkConfigListener { op, _, config ->
         Log.i("ZeroTier", "Config updated: $op, $config")
         0
     }

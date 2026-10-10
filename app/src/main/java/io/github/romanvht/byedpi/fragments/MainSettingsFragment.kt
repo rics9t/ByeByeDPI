@@ -9,6 +9,7 @@ import androidx.core.content.edit
 import androidx.preference.*
 import io.github.romanvht.byedpi.R
 import io.github.romanvht.byedpi.BuildConfig
+import io.github.romanvht.byedpi.activities.SettingsActivity
 import io.github.romanvht.byedpi.activities.TestActivity
 import io.github.romanvht.byedpi.data.Mode
 import io.github.romanvht.byedpi.data.PrivateDnsState
@@ -88,6 +89,15 @@ class MainSettingsFragment : PreferenceFragmentCompat() {
 
         findPreferenceNotNull<Preference>("version").summary = BuildConfig.VERSION_NAME
         findPreferenceNotNull<Preference>("byedpi_version").summary = "0.17.3 (ba53229)"
+
+        // ZeroTier Hook
+        findPreferenceNotNull<Preference>("zerotier_settings")
+            .setOnPreferenceClickListener {
+                val intent = Intent(context, SettingsActivity::class.java)
+                intent.putExtra("open_fragment", "zerotier")
+                startActivity(intent)
+                true
+            }
 
         updatePreferences()
     }

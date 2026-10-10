@@ -213,4 +213,11 @@
 
     </androidx.preference.PreferenceCategory>
 
+    <PreferenceCategory android:title="ZeroTier">
+        <Preference
+            android:key="zerotier_settings"
+            android:title="ZeroTier Networks"
+            android:summary="Manage ZeroTier virtual networks" />
+    </PreferenceCategory>
+
 </PreferenceScreen>
