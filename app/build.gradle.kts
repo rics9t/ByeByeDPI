@@ -13,7 +13,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.rics.zerodpi"
+        applicationId = "io.github.romanvht.byedpi"
         minSdk = 21
         //noinspection OldTargetApi
         targetSdk = 34
@@ -24,6 +24,13 @@ android {
 
         ndk {
             abiFilters.addAll(abis)
+        }
+    }
+
+    // THIS IS THE FIX: We tell Gradle to pack .so files from a safe folder
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDirs("src/main/jniLibs", "src/main/ztLibs")
         }
     }
 
@@ -62,11 +69,8 @@ android {
         }
     }
 
-    // https://android.izzysoft.de/articles/named/iod-scan-apkchecks?lang=en#blobs
     dependenciesInfo {
-        // Disables dependency metadata when building APKs.
         includeInApk = false
-        // Disables dependency metadata when building Android App Bundles.
         includeInBundle = false
     }
 
