@@ -1,14 +1,10 @@
 package io.github.romanvht.byedpi.zerotier
 
 import android.content.Context
-import android.content.Intent
 import android.net.VpnService
 import android.util.Log
 import com.google.gson.Gson
 import com.zerotier.sdk.*
-import io.github.romanvht.byedpi.data.Mode
-import io.github.romanvht.byedpi.data.RESTART_ACTION
-import io.github.romanvht.byedpi.receiver.ServiceActionReceiver
 import java.io.File
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -86,27 +82,31 @@ class ZeroTierManager(private val context: Context) {
         socket?.let { s ->
             try {
                 service?.protect(s)
-                Log.i("ZeroTier", "Protected ZeroTier UDP socket from VPN")
+                Log.i("ZeroTier", "Protected ZeroTier UDP socket directly on physical network")
             } catch (e: Exception) {
                 Log.w("ZeroTier", "Failed to protect socket", e)
             }
         }
     }
 
-    fun init() {
+    fun init(service: VpnService? = null) {
         if (node != null) return
+        this.vpnService = service
         try {
             try {
                 socket = DatagramSocket(9993)
             } catch (_: Exception) {
                 socket = DatagramSocket(0)
             }
-            vpnService?.let { s -> socket?.let { sock -> s.protect(sock) } }
+
+            // Immediately protect socket so ZeroTier bypasses ByeDPI/VPN and talks directly to Wi-Fi/LTE
+            socket?.let { s -> vpnService?.protect(s) }
 
             val now = System.currentTimeMillis()
             val n = Node(now)
             node = n
 
+            // Pass null for pathChecker to eliminate JNI reflection errors
             val res = n.init(
                 getListener,
                 putListener,
@@ -114,7 +114,7 @@ class ZeroTierManager(private val context: Context) {
                 eventListener,
                 frameListener,
                 configListener,
-                pathChecker
+                null
             )
 
             if (res != ResultCode.RESULT_OK) {
@@ -122,12 +122,9 @@ class ZeroTierManager(private val context: Context) {
                 return
             }
 
-            // Safe to query address only AFTER init() has completed
             try {
                 cachedAddress = n.address()
-            } catch (e: Exception) {
-                Log.w("ZeroTier", "Address query deferred", e)
-            }
+            } catch (_: Exception) {}
 
             syncNetworks()
             saveState()
@@ -300,12 +297,6 @@ class ZeroTierManager(private val context: Context) {
         } catch (_: Exception) { -1 }
     }
 
-    private val pathChecker = object : PathChecker {
-        override fun onPathCheck(ztAddress: Long, localSocket: Long, remoteAddress: InetSocketAddress?): Boolean = true
-        override fun onPathLookup(ztAddress: Long, ss_family: Int): InetSocketAddress? = null
-    }
-
-    // FIX: DO NOT call native JNI methods (like saveState/address) inside callbacks!
     private val eventListener = object : EventListener {
         override fun onEvent(event: Event?) {
             Log.i("ZeroTier", "Event: $event")
@@ -334,32 +325,16 @@ class ZeroTierManager(private val context: Context) {
 
         if (config.assignedAddresses != null) {
             val assignedSet = mutableSetOf<String>()
-            val currentSavedIps = prefs.getStringSet("assigned_ips", emptySet()) ?: emptySet()
-            var hasNewIp = false
-
             for (addr in config.assignedAddresses) {
                 val host = addr.address?.hostAddress ?: continue
                 val prefix = addr.port
-                val entry = "$host/$prefix"
-                assignedSet.add(entry)
-                if (!currentSavedIps.contains(entry)) {
-                    hasNewIp = true
-                }
+                assignedSet.add("$host/$prefix")
 
                 val ipInt = v4(addr.address) ?: continue
                 val ipLong = ipInt.toLong() and 0xFFFFFFFFL
                 node?.multicastSubscribe(nwid, 0xFFFFFFFFFFFFL, ipLong)
             }
             prefs.edit().putStringSet("assigned_ips", assignedSet).apply()
-
-            if (hasNewIp) {
-                Log.i("ZeroTier", "New IP assigned ($assignedSet), restarting VPN tunnel...")
-                val intent = Intent(context, ServiceActionReceiver::class.java).apply {
-                    action = RESTART_ACTION
-                    putExtra(ServiceActionReceiver.EXTRA_MODE, Mode.VPN.name)
-                }
-                context.sendBroadcast(intent)
-            }
         }
         0
     }
@@ -372,7 +347,6 @@ object ZeroTierServiceManager {
     fun getInstance(context: Context): ZeroTierManager {
         if (manager == null) {
             manager = ZeroTierManager(context.applicationContext)
-            manager?.init()
         }
         return manager!!
     }

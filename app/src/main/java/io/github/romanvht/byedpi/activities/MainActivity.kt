@@ -426,23 +426,23 @@ class MainActivity : BaseActivity() {
 
         val ztText = when {
             enabledNets.isEmpty() -> "ZeroTier: Disabled"
-            status != AppStatus.Running -> "ZeroTier: OFFLINE (VPN stopped)"
+            status != AppStatus.Running -> "Not connected to ZeroTier (OFFLINE)"
             ztState != null && ztState.isOnline -> {
                 val okNets = ztState.networks.filter { it.status == "OK" }
                 if (okNets.isNotEmpty()) {
-                    "ZeroTier: ONLINE (${okNets.joinToString { it.name }})"
+                    "Connected to ZeroTier (ONLINE - ${okNets.joinToString { it.name }})"
                 } else {
-                    val requesting = ztState.networks.any { it.status.contains("REQUESTING") }
                     val denied = ztState.networks.any { it.status.contains("DENIED") }
+                    val requesting = ztState.networks.any { it.status.contains("REQUESTING") }
                     when {
                         denied -> "ZeroTier: Access Denied (Authorize in controller)"
                         requesting -> "ZeroTier: Requesting configuration..."
-                        else -> "ZeroTier: ONLINE (${ztState.nodeAddress})"
+                        else -> "Connected to ZeroTier (ONLINE)"
                     }
                 }
             }
             status == AppStatus.Running -> "ZeroTier: Connecting..."
-            else -> "ZeroTier: OFFLINE"
+            else -> "Not connected to ZeroTier (OFFLINE)"
         }
 
         binding.proxyAddress.text = "$proxyText\n$ztText"

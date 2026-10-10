@@ -208,7 +208,6 @@ internal class NativeSession(
         nativeStarted = true
         startJob = scope.launch {
             try {
-                // Initialize ZeroTier on background thread safely
                 val ztManager = withContext(Dispatchers.IO) {
                     try {
                         ZeroTierServiceManager.getInstance(service)
@@ -237,7 +236,6 @@ internal class NativeSession(
                         appendLine("  udp: udp")
                     }
 
-                    // FALLBACK PROTECTION: If ZeroTier is available, route packets. Otherwise direct to ByeDPI
                     if (ztManager != null && ztManager.isAvailable()) {
                         try {
                             val router = TunZeroTierRouter(fd, ztManager)
@@ -250,6 +248,7 @@ internal class NativeSession(
                             tunnelThread = runNative("HEV") { TProxyService.startTunnel(tunnelConfig, fd.fd) }
                         }
                     } else {
+                        // Fallback: Normal ByeDPI tunnel
                         tunnelThread = runNative("HEV") { TProxyService.startTunnel(tunnelConfig, fd.fd) }
                     }
                     delay(100)
