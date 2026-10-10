@@ -6,6 +6,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -46,7 +47,7 @@ class ZeroTierFragment : Fragment() {
                     MTU: ${config?.mtu ?: "-"}
                     Broadcast: ${config?.isBroadcastEnabled ?: "-"}
                     Bridging: ${config?.isBridge ?: "-"}
-                    Managed IPs: ${config?.assignedAddresses?.joinToString(", ") { it.address.hostAddress } ?: "-"}
+                    Managed IPs: ${config?.assignedAddresses?.joinToString(", ") { it.address?.hostAddress ?: it.hostString } ?: "-"}
                 """.trimIndent()
                 
                 AlertDialog.Builder(requireContext())
@@ -78,9 +79,11 @@ class ZeroTierFragment : Fragment() {
                 .setView(input)
                 .setPositiveButton("Add") { _, _ ->
                     val nwid = input.text.toString().trim()
-                    if (nwid.length == 16) {
-                        manager.addNetwork(nwid)
-                        adapter.addNetwork(nwid)
+                    if (nwid.matches(Regex("[0-9a-fA-F]{16}"))) {
+                        manager.addNetwork(nwid.lowercase())
+                        adapter.addNetwork(nwid.lowercase())
+                    } else {
+                        Toast.makeText(requireContext(), "Invalid 16-character Network ID", Toast.LENGTH_SHORT).show()
                     }
                 }
                 .setNegativeButton("Cancel", null)

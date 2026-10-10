@@ -46,7 +46,7 @@ class ZeroTierManager(private val context: Context) {
 
             // Join networks that are toggled "ON"
             enabledNetworks.forEach {
-                try { node?.join(it.toLong(16)) } catch (e: Exception) {}
+                try { node?.join(java.math.BigInteger(it, 16).toLong()) } catch (e: Exception) {}
             }
 
             // ZeroTier Background Task Loop
@@ -65,13 +65,18 @@ class ZeroTierManager(private val context: Context) {
                 val packet = DatagramPacket(buf, buf.size)
                 while (node?.isInited == true) {
                     try {
-                        socket?.receive(packet)
+                        val s = socket
+                        if (s == null || s.isClosed) {
+                            Thread.sleep(1000)
+                            continue
+                        }
+                        s.receive(packet)
                         val data = packet.data.copyOf(packet.length)
                         val deadline = LongArray(1)
                         val addr = packet.socketAddress as InetSocketAddress
                         node?.processWirePacket(System.currentTimeMillis(), -1, addr, data, deadline)
                     } catch (e: Exception) {
-                        // Ignore read timeouts/socket closures
+                        try { Thread.sleep(100) } catch (ie: InterruptedException) {}
                     }
                 }
             }
@@ -84,10 +89,10 @@ class ZeroTierManager(private val context: Context) {
         val enabled = enabledNetworks.toMutableSet()
         if (enable) {
             enabled.add(nwid)
-            try { node?.join(nwid.toLong(16)) } catch (e: Exception) {}
+            try { node?.join(java.math.BigInteger(nwid, 16).toLong()) } catch (e: Exception) {}
         } else {
             enabled.remove(nwid)
-            try { node?.leave(nwid.toLong(16)) } catch (e: Exception) {}
+            try { node?.leave(java.math.BigInteger(nwid, 16).toLong()) } catch (e: Exception) {}
         }
         enabledNetworks = enabled
     }
