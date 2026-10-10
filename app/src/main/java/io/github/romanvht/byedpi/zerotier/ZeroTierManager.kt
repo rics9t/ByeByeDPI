@@ -2,6 +2,7 @@ package io.github.romanvht.byedpi.zerotier
 
 import android.content.Context
 import android.util.Log
+import com.google.gson.Gson
 import com.zerotier.sdk.*
 import java.io.File
 import java.net.DatagramPacket
@@ -14,8 +15,10 @@ class ZeroTierManager(private val context: Context) {
     var router: TunZeroTierRouter? = null
 
     private val dataStoreDir = File(context.filesDir, "zerotier").apply { mkdirs() }
+    private val stateFile = File(context.filesDir, "zerotier_state.json")
     private var socket: DatagramSocket? = null
     private val prefs = context.getSharedPreferences("zerotier_prefs", Context.MODE_PRIVATE)
+    private val gson = Gson()
 
     var savedNetworks: Set<String>
         get() = prefs.getStringSet("saved_networks", emptySet()) ?: emptySet()
@@ -45,9 +48,9 @@ class ZeroTierManager(private val context: Context) {
                 pathChecker
             )
 
-            // Join networks that are toggled "ON"
+            // Join networks toggled ON
             enabledNetworks.forEach {
-                try { node?.join(java.math.BigInteger(it, 16).toLong()) } catch (e: Exception) {}
+                try { node?.join(java.math.BigInteger(it, 16).toLong()) } catch (_: Exception) {}
             }
 
             thread(name = "ZeroTier-Background") {
@@ -55,6 +58,7 @@ class ZeroTierManager(private val context: Context) {
                     try {
                         val deadline = LongArray(1)
                         node?.processBackgroundTasks(System.currentTimeMillis(), deadline)
+                        saveState()
                         val sleepTime = (deadline[0] - System.currentTimeMillis()).coerceIn(50, 1000)
                         if (sleepTime > 0) Thread.sleep(sleepTime)
                     } catch (e: Exception) {
@@ -92,10 +96,10 @@ class ZeroTierManager(private val context: Context) {
         val enabled = enabledNetworks.toMutableSet()
         if (enable) {
             enabled.add(nwid)
-            try { node?.join(java.math.BigInteger(nwid, 16).toLong()) } catch (e: Exception) {}
+            try { node?.join(java.math.BigInteger(nwid, 16).toLong()) } catch (_: Exception) {}
         } else {
             enabled.remove(nwid)
-            try { node?.leave(java.math.BigInteger(nwid, 16).toLong()) } catch (e: Exception) {}
+            try { node?.leave(java.math.BigInteger(nwid, 16).toLong()) } catch (_: Exception) {}
         }
         enabledNetworks = enabled
     }
@@ -124,9 +128,6 @@ class ZeroTierManager(private val context: Context) {
 
     data class ZtRoute(val nwid: Long, val targetIp: Int, val prefix: Int)
 
-    /**
-     * Finds if a target IP matches any active ZeroTier network routes
-     */
     fun findRouteForIp(ip: Int): ZtRoute? {
         for (cfg in getConfigs()) {
             for (route in cfg.routes) {
@@ -164,6 +165,46 @@ class ZeroTierManager(private val context: Context) {
                 ((parts[1].toInt() and 0xFF) shl 16) or
                 ((parts[2].toInt() and 0xFF) shl 8) or
                 (parts[3].toInt() and 0xFF)
+    }
+
+    data class ExportedNetwork(
+        val nwid: String,
+        val name: String,
+        val status: String,
+        val type: String,
+        val mac: String,
+        val mtu: Int,
+        val broadcast: Boolean,
+        val bridge: Boolean,
+        val ips: List<String>
+    )
+
+    data class SharedState(
+        val nodeAddress: String,
+        val isOnline: Boolean,
+        val networks: List<ExportedNetwork>
+    )
+
+    private fun saveState() {
+        try {
+            val addr = node?.address()?.let { String.format("%010x", it) } ?: "--------"
+            val online = node?.status()?.isOnline == true
+            val exported = getConfigs().map { cfg ->
+                ExportedNetwork(
+                    nwid = String.format("%016x", cfg.nwid),
+                    name = cfg.name ?: "-",
+                    status = cfg.status?.name?.replace("NETWORK_STATUS_", "") ?: "NOT CONNECTED",
+                    type = cfg.type?.name?.replace("NETWORK_TYPE_", "") ?: "-",
+                    mac = String.format("%012x", cfg.mac),
+                    mtu = cfg.mtu,
+                    broadcast = cfg.isBroadcastEnabled,
+                    bridge = cfg.isBridge,
+                    ips = cfg.assignedAddresses?.mapNotNull { it.address?.hostAddress } ?: emptyList()
+                )
+            }
+            val json = gson.toJson(SharedState(addr, online, exported))
+            stateFile.writeText(json)
+        } catch (_: Exception) {}
     }
 
     private val getListener = DataStoreGetListener { name, out_buffer ->
@@ -220,7 +261,6 @@ class ZeroTierManager(private val context: Context) {
         override fun onTrace(message: String?) { Log.d("ZeroTier", "Trace: $message") }
     }
 
-    // INCOMING FRAME ROUTER: Dispatches frames from peers into Android TUN
     private val frameListener = VirtualNetworkFrameListener { nwid, _, _, etherType, _, frameData ->
         if (etherType == 0x0806L) {
             router?.handleArpFrame(nwid, frameData)
@@ -231,8 +271,6 @@ class ZeroTierManager(private val context: Context) {
 
     private val configListener = VirtualNetworkConfigListener { nwid, op, config ->
         Log.i("ZeroTier", "Config updated for $nwid: $op, status=${config.status}")
-
-        // Multicast subscribe so peers can discover us via ARP
         if (config.assignedAddresses != null) {
             val assignedSet = mutableSetOf<String>()
             for (addr in config.assignedAddresses) {
@@ -240,7 +278,6 @@ class ZeroTierManager(private val context: Context) {
                 val prefix = addr.port
                 assignedSet.add("$host/$prefix")
 
-                // Subscribe to 0xFFFFFFFFFFFFL with the IP as ADI for ARP
                 val ipLong = (ipStringToInt(host).toLong()) and 0xFFFFFFFFL
                 node?.multicastSubscribe(nwid, 0xFFFFFFFFFFFFL, ipLong)
             }

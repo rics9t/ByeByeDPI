@@ -26,11 +26,9 @@ class TunZeroTierRouter(
     @Volatile
     private var isRunning = false
 
-    // Maps IPv4 integer -> 48-bit MAC address
     private val arpTable = ConcurrentHashMap<Int, Long>()
 
     init {
-        // Create an atomic datagram socketpair to talk to hev-socks5-tunnel
         Os.socketpair(OsConstants.AF_UNIX, OsConstants.SOCK_DGRAM, 0, sv[0], sv[1])
         try {
             Os.setsockoptInt(sv[0], OsConstants.SOL_SOCKET, OsConstants.SO_SNDBUF, 1048576)
@@ -40,19 +38,17 @@ class TunZeroTierRouter(
         } catch (_: Exception) {}
 
         hevPfd = ParcelFileDescriptor.dup(sv[1])
+        try { Os.close(sv[1]) } catch (_: Exception) {}
+
         ztManager.router = this
     }
 
-    /**
-     * Integer file descriptor given to hev-socks5-tunnel
-     */
     fun getHevTunnelFd(): Int = hevPfd!!.fd
 
     fun start() {
         if (isRunning) return
         isRunning = true
 
-        // Thread 1: Read outbound packets from Android TUN
         thread(name = "TunRouter-Outbound") {
             val buffer = ByteArray(BUFFER_SIZE)
             while (isRunning) {
@@ -69,24 +65,23 @@ class TunZeroTierRouter(
 
                         val ztRoute = ztManager.findRouteForIp(destIp)
                         if (ztRoute != null) {
-                            // Route directly to ZeroTier!
                             val packet = buffer.copyOf(bytesRead)
                             sendToZeroTier(ztRoute.nwid, destIp, packet)
                             continue
                         }
                     }
 
-                    // Otherwise, pass normal internet traffic to ByeByeDPI
                     synchronized(hevWriteLock) {
-                        Os.write(sv[0], buffer, 0, bytesRead)
+                        try {
+                            Os.write(sv[0], buffer, 0, bytesRead)
+                        } catch (_: Exception) {}
                     }
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     if (!isRunning) break
                 }
             }
         }
 
-        // Thread 2: Read inbound internet responses from hev-socks5-tunnel -> Android TUN
         thread(name = "TunRouter-InboundHev") {
             val buffer = ByteArray(BUFFER_SIZE)
             while (isRunning) {
@@ -95,9 +90,11 @@ class TunZeroTierRouter(
                     if (bytesRead <= 0) break
 
                     synchronized(tunWriteLock) {
-                        Os.write(realTunFd, buffer, 0, bytesRead)
+                        try {
+                            Os.write(realTunFd, buffer, 0, bytesRead)
+                        } catch (_: Exception) {}
                     }
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     if (!isRunning) break
                 }
             }
@@ -108,13 +105,9 @@ class TunZeroTierRouter(
         isRunning = false
         ztManager.router = null
         try { Os.close(sv[0]) } catch (_: Exception) {}
-        try { Os.close(sv[1]) } catch (_: Exception) {}
         try { hevPfd?.close() } catch (_: Exception) {}
     }
 
-    /**
-     * Injects decapsulated ZeroTier IPv4 packets directly into Android TUN
-     */
     fun writeToTun(data: ByteArray) {
         if (!isRunning) return
         synchronized(tunWriteLock) {
@@ -132,7 +125,6 @@ class TunZeroTierRouter(
         var destMac = arpTable[destIp]
 
         if (destMac == null) {
-            // Trigger ARP request and broadcast initial packet
             sendArpRequest(nwid, ourMac, destIp)
             destMac = 0xFFFFFFFFFFFFL
         }
@@ -150,9 +142,6 @@ class TunZeroTierRouter(
         )
     }
 
-    /**
-     * Handles incoming ARP requests from ZeroTier peers
-     */
     fun handleArpFrame(nwid: Long, frameData: ByteArray) {
         if (frameData.size < 28) return
         val opcode = ((frameData[6].toInt() and 0xFF) shl 8) or (frameData[7].toInt() and 0xFF)
@@ -162,7 +151,7 @@ class TunZeroTierRouter(
 
         arpTable[senderIp] = senderMac
 
-        if (opcode == 1) { // ARP Request
+        if (opcode == 1) {
             val config = ztManager.getConfigs().firstOrNull { it.nwid == nwid } ?: return
             val ourAssigned = ztManager.getAssignedIpInts(nwid)
 
@@ -170,7 +159,7 @@ class TunZeroTierRouter(
                 val reply = ByteArray(28)
                 reply[0] = 0; reply[1] = 1; reply[2] = 8; reply[3] = 0
                 reply[4] = 6; reply[5] = 4
-                reply[6] = 0; reply[7] = 2 // Reply opcode
+                reply[6] = 0; reply[7] = 2
 
                 longToMacBytes(config.mac, reply, 8)
                 ipToBytes(targetIp, reply, 14)
@@ -197,7 +186,7 @@ class TunZeroTierRouter(
         val req = ByteArray(28)
         req[0] = 0; req[1] = 1; req[2] = 8; req[3] = 0
         req[4] = 6; req[5] = 4
-        req[6] = 0; req[7] = 1 // Request opcode
+        req[6] = 0; req[7] = 1
 
         longToMacBytes(ourMac, req, 8)
         ipToBytes(ourIp, req, 14)

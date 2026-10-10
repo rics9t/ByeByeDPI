@@ -242,8 +242,6 @@ class MainActivity : BaseActivity() {
         }
 
         ShortcutUtils.update(this)
-        
-        io.github.romanvht.byedpi.zerotier.ZeroTierServiceManager.getInstance(this)
     }
 
     override fun onResume() {
